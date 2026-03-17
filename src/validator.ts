@@ -63,11 +63,10 @@ app.get('/health', (req, res) => {
 });
 
 app.post('/verify/signatures', authMiddleware, async (req, res) => {
-    // 1. Log the raw length to verify the JSON arrived
-    const tasks = req.body?.tasks || [];
-    console.log(`Received batch size: ${tasks.length}`);
+    const rawTasks = req.body?.tasks || [];
+    console.log(`Received batch size: ${rawTasks.length}`);
 
-    if (tasks.length === 0) {
+    if (rawTasks.length === 0) {
         return res.status(400).json({ 
             error: "No tasks provided in the 'tasks' array",
             received: req.body 
@@ -75,14 +74,30 @@ app.post('/verify/signatures', authMiddleware, async (req, res) => {
     }
 
     try {
+        // Transformar los strings hexadecimales a Buffers binarios puros
+        const formattedTasks = rawTasks.map((t: any) => {
+            const hashBuf = Buffer.from(t.hash, 'hex');
+            const sigBuf = Buffer.from(t.sig, 'hex');
+            const pubKeyBuf = Buffer.from(t.pubKey, 'hex');
+
+            return {
+                hash: hashBuf,
+                sig: sigBuf,
+                pubKey: pubKeyBuf,
+                // Le pasamos explícitamente las longitudes reales en bytes al struct C++
+                sigLen: sigBuf.length,   
+                pubKeyLen: pubKeyBuf.length
+            };
+        });
+
         const start = Date.now();
-        // 2. Wrap the native call to ensure it doesn't hang the event loop
-        const results = await verifySignaturesAsync(tasks);
+        // Pasamos el array ya pre-procesado como memoria cruda
+        const results = await verifySignaturesAsync(formattedTasks);
         
         res.json({
             results,
             batchTimeMs: Date.now() - start,
-            count: tasks.length,
+            count: formattedTasks.length,
             mode: usingGPU ? 'gpu' : 'cpu'
         });
     } catch (e) {

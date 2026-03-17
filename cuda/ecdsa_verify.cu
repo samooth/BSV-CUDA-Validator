@@ -73,18 +73,32 @@ __device__ void montMul(uint32_t* r, const uint32_t* a, const uint32_t* b, const
     uint32_t t[9] = {0};
     for (int i = 0; i < 8; i++) {
         uint32_t ui = (t[0] + a[i] * b[0]) * minv;
-        uint64_t chain = (uint64_t)a[i] * b[0] + t[0] + (uint64_t)ui * m[0];
+        
+        // Iteración inicial limpia (garantiza evitar overflow)
+        uint64_t term1 = (uint64_t)a[i] * b[0] + t[0];
+        uint64_t term2 = (uint64_t)ui * m[0] + (uint32_t)term1;
+        uint64_t carry_in = (term1 >> 32) + (term2 >> 32);
+        
         for (int j = 1; j < 8; j++) {
-            chain = (uint64_t)a[i] * b[j] + t[j] + (uint64_t)ui * m[j] + (chain >> 32);
-            t[j-1] = (uint32_t)chain;
+            // Dividimos la carga para que ninguna variable supere jamás los 64 bits
+            term1 = (uint64_t)a[i] * b[j] + t[j];
+            term2 = (uint64_t)ui * m[j] + (uint32_t)term1;
+            uint64_t carry = (term1 >> 32) + (term2 >> 32);
+            
+            // Añadimos el acarreo de la iteración anterior
+            uint64_t term3 = (uint32_t)term2 + carry_in;
+            t[j-1] = (uint32_t)term3;
+            carry_in = carry + (term3 >> 32);
         }
-        chain = (uint64_t)t[8] + (chain >> 32);
-        t[7] = (uint32_t)chain;
-        t[8] = (uint32_t)(chain >> 32);
+        
+        uint64_t final_sum = (uint64_t)t[8] + carry_in;
+        t[7] = (uint32_t)final_sum;
+        t[8] = (uint32_t)(final_sum >> 32);
     }
+    
     uint32_t res[8];
-    uint32_t no_borrow = sub256(res, t, m);
-    if (t[8] > 0 || no_borrow) {
+    uint32_t borrow = sub256(res, t, m);
+    if (t[8] > 0 || !borrow) {
         for(int k=0; k<8; k++) r[k] = res[k];
     } else {
         for(int k=0; k<8; k++) r[k] = t[k];
@@ -102,8 +116,9 @@ __device__ void modAdd(uint32_t* r, const uint32_t* a, const uint32_t* b, const 
           "r"(b[0]), "r"(b[1]), "r"(b[2]), "r"(b[3]), "r"(b[4]), "r"(b[5]), "r"(b[6]), "r"(b[7])
     );
     uint32_t res[8];
-    uint32_t no_borrow = sub256(res, t, m);
-    if (c || no_borrow) {
+    uint32_t borrow = sub256(res, t, m);
+    
+    if (c || !borrow) {
         for(int k=0; k<8; k++) r[k] = res[k];
     } else {
         for(int k=0; k<8; k++) r[k] = t[k];
@@ -112,8 +127,9 @@ __device__ void modAdd(uint32_t* r, const uint32_t* a, const uint32_t* b, const 
 
 __device__ void modSub(uint32_t* r, const uint32_t* a, const uint32_t* b, const uint32_t* m) {
     uint32_t res[8];
-    uint32_t no_borrow = sub256(res, a, b);
-    if (no_borrow) {
+    uint32_t borrow = sub256(res, a, b);
+    
+    if (!borrow) {
         for(int k=0; k<8; k++) r[k] = res[k];
     } else {
         add256(r, res, m);
