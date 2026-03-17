@@ -76,5 +76,10 @@ node tests/check_sig.js
 - **Jacobian Coordinates**: Optimized for Secp256k1 ($a=0$).
 - **Strict Low-S**: Mandatory for Bitcoin SV compatibility.
 
+## Donations
+If you find this GPU validator useful, feel free to support the development:
+- **HandCash**: [handcash.me/samooth](https://handcash.me/samooth)
+- **BSV Address**: `samooth@handcash.io`
+
 ## License
 MIT

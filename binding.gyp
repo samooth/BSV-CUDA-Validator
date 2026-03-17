@@ -14,7 +14,7 @@
         "-lbsv_cuda",
         "-Wl,-rpath,<(module_root_dir)/cuda"
       ],
-      "cflags_cc": ["-std=c++17"],
+      "cflags_cc": ["-std=c++20"],
       "conditions": [
         ["OS=='linux'", {
           "ldflags": ["-Wl,-rpath,/usr/local/cuda/lib64"]
