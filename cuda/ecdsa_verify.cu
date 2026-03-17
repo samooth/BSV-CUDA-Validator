@@ -1,8 +1,12 @@
 #include <cuda_runtime.h>
 #include <cstdint>
+#include <stdio.h>
+
+// Set to 1 to see intermediate math in docker logs (first task only)
+#define DEBUG_VERIFY 1
 
 // ============================================================================
-// Secp256k1 Constants & Types (LSB-First: limb[0] is least significant)
+// Secp256k1 Constants & Types (LSB-First)
 // ============================================================================
 
 typedef struct { uint32_t limbs[8]; } uint256;
@@ -17,24 +21,26 @@ typedef struct {
 } SigTask;
 #pragma pack(pop)
 
-// Field Prime P (LSB first)
 __constant__ uint32_t c_p[8] = {0xFFFFFC2F, 0xFFFFFFFE, 0xFFFFFFFF, 0xFFFFFFFF, 0xFFFFFFFF, 0xFFFFFFFF, 0xFFFFFFFF, 0xFFFFFFFF};
-// Curve Order N (LSB first)
 __constant__ uint32_t c_n[8] = {0xD0364141, 0xBFD25E8C, 0xAF48A03B, 0xBAAEDCE6, 0xFFFFFFFE, 0xFFFFFFFF, 0xFFFFFFFF, 0xFFFFFFFF};
-// Generator G (LSB first)
 __constant__ uint32_t c_gx[8] = {0x16F81798, 0x59F2815B, 0x2DCE28D9, 0x029BFCDB, 0xCE870B07, 0x55A06295, 0xF9DCBBAC, 0x79BE667E};
 __constant__ uint32_t c_gy[8] = {0xFB10D4B8, 0x9C47D08F, 0xA6855419, 0xFD17B448, 0x0E1108A8, 0x5DA4FBFC, 0x26A3C465, 0x483ADA77};
 
-// Montgomery Constants
-__constant__ uint32_t c_p_inv = 0xD8380911; // -P^-1 mod 2^32
+__constant__ uint32_t c_p_inv = 0xD8380911;
 __constant__ uint32_t c_p_r2[8] = {0x000003D1, 0x00000402, 0x00000000, 0x00000001, 0x00000001, 0x00000000, 0x00000000, 0x00000000};
-__constant__ uint32_t c_n_inv = 0x4B0DFFEF; // -N^-1 mod 2^32
+__constant__ uint32_t c_n_inv = 0x4B0DFFEF;
 __constant__ uint32_t c_n_r2[8] = {0xE90A1049, 0x3E112E71, 0x95F710D6, 0x7AB21E54, 0x7024E3C7, 0x20B095C2, 0x81C6AD45, 0x9D671CD5};
 __constant__ uint32_t c_sqrt_e[8] = {0xFFFFFE0C, 0xFFFFFFFB, 0xFFFFFFFF, 0xFFFFFFFF, 0xFFFFFFFF, 0xFFFFFFFF, 0xFFFFFFFF, 0x3FFFFFFF};
 
 // ============================================================================
-// Arithmetic (LSB-First)
+// Arithmetic
 // ============================================================================
+
+__device__ __forceinline__ void print256(const char* label, const uint32_t* a) {
+#if DEBUG_VERIFY
+    printf("%s: %08x%08x%08x%08x%08x%08x%08x%08x\n", label, a[7], a[6], a[5], a[4], a[3], a[2], a[1], a[0]);
+#endif
+}
 
 __device__ __forceinline__ void add256(uint32_t* r, const uint32_t* a, const uint32_t* b) {
     asm volatile (
@@ -54,9 +60,9 @@ __device__ __forceinline__ uint32_t sub256(uint32_t* r, const uint32_t* a, const
         "addc.u32 %8, 0, 0; "
         : "=r"(r[0]), "=r"(r[1]), "=r"(r[2]), "=r"(r[3]), "=r"(r[4]), "=r"(r[5]), "=r"(r[6]), "=r"(r[7]), "=r"(borrow)
         : "r"(a[0]), "r"(a[1]), "r"(a[2]), "r"(a[3]), "r"(a[4]), "r"(a[5]), "r"(a[6]), "r"(a[7]),
-          "r"(b[0]), "r"(b[1]), "r"(b[2]), "r"(b[3]), "r"(b[4]), "r"(b[3]), "r"(b[6]), "r"(b[7])
+          "r"(b[0]), "r"(b[1]), "r"(b[2]), "r"(b[3]), "r"(b[4]), "r"(b[5]), "r"(b[6]), "r"(b[7])
     );
-    return 1 - borrow;
+    return 1 - borrow; // returns 1 if a >= b (no borrow), 0 if a < b (borrow)
 }
 
 __device__ __forceinline__ bool isZero256(const uint32_t* a) {
@@ -76,7 +82,10 @@ __device__ void montMul(uint32_t* r, const uint32_t* a, const uint32_t* b, const
         t[7] = (uint32_t)chain;
         t[8] = (uint32_t)(chain >> 32);
     }
-    if (!sub256(r, t, m)) {
+    // Result is in t[0..7], overflow in t[8]
+    if (t[8] > 0 || sub256(r, t, m)) {
+        sub256(r, t, m);
+    } else {
         for(int k=0; k<8; k++) r[k] = t[k];
     }
 }
@@ -91,14 +100,16 @@ __device__ void modAdd(uint32_t* r, const uint32_t* a, const uint32_t* b, const 
         : "r"(a[0]), "r"(a[1]), "r"(a[2]), "r"(a[3]), "r"(a[4]), "r"(a[5]), "r"(a[6]), "r"(a[7]),
           "r"(b[0]), "r"(b[1]), "r"(b[2]), "r"(b[3]), "r"(b[4]), "r"(b[5]), "r"(b[6]), "r"(b[7])
     );
-    if (c || !sub256(r, t, m)) { for(int k=0; k<8; k++) r[k] = t[k]; }
+    if (c || sub256(r, t, m)) {
+        sub256(r, t, m);
+    } else {
+        for(int k=0; k<8; k++) r[k] = t[k];
+    }
 }
 
 __device__ void modSub(uint32_t* r, const uint32_t* a, const uint32_t* b, const uint32_t* m) {
-    if (sub256(r, a, b)) {
-        uint32_t t[8];
-        add256(t, r, m);
-        for(int k=0; k<8; k++) r[k] = t[k];
+    if (!sub256(r, a, b)) { // if borrow happened (a < b)
+        add256(r, r, m);
     }
 }
 
@@ -114,7 +125,7 @@ __device__ void montExp(uint32_t* r, const uint32_t* a, const uint32_t* e, const
 }
 
 // ============================================================================
-// Points
+// Point Arithmetic
 // ============================================================================
 
 typedef struct { uint32_t x[8], y[8], z[8]; } Point;
@@ -142,7 +153,7 @@ __device__ void pointDouble(Point* r, const Point* a) {
 __device__ void pointAdd(Point* r, const Point* a, const Point* b) {
     if (isZero256(a->z)) { *r = *b; return; }
     if (isZero256(b->z)) { *r = *a; return; }
-    uint32_t Z1Z1[8], Z2Z2[8], U1[8], U2[8], S1[8], S2[8], H[8], R[8], H2[8], H3[8], V[8], T1[8], T2[8], T3[8];
+    uint32_t Z1Z1[8], Z2Z2[8], U1[8], U2[8], S1[8], S2[8], H[8], R[8], H2[8], H3[8], V[8], T1[8];
     montMul(Z1Z1, a->z, a->z, c_p, c_p_inv);
     montMul(Z2Z2, b->z, b->z, c_p, c_p_inv);
     montMul(U1, a->x, Z2Z2, c_p, c_p_inv);
@@ -162,6 +173,7 @@ __device__ void pointAdd(Point* r, const Point* a, const Point* b) {
     modSub(r->x, r->x, H3, c_p);
     modSub(r->x, r->x, V, c_p); modSub(r->x, r->x, V, c_p);
     modSub(T1, V, r->x, c_p);
+    uint32_t T2[8], T3[8];
     montMul(T2, R, T1, c_p, c_p_inv);
     montMul(T3, S1, H3, c_p, c_p_inv);
     modSub(r->y, T2, T3, c_p);
@@ -170,7 +182,7 @@ __device__ void pointAdd(Point* r, const Point* a, const Point* b) {
 }
 
 // ============================================================================
-// Logic & Entry
+// Logic
 // ============================================================================
 
 __device__ void parseRaw256(uint32_t* r, const uint8_t* data, int len) {
@@ -231,34 +243,47 @@ __device__ bool parsePubKey(const uint8_t* pk, int len, Point* Q) {
     return false;
 }
 
-__device__ bool verify_internal(const SigTask* t) {
+__device__ bool verify_internal(const SigTask* t, int idx) {
     uint32_t r_val[8], s_val[8], h_val[8];
     if (!parseDER(t->sig, t->sigLen, r_val, s_val)) return false;
+    
+    if (idx == 0) {
+        print256("Parsed R", r_val);
+        print256("Parsed S", s_val);
+    }
+
     uint32_t n_half[8];
     for(int k=0; k<8; k++) n_half[k] = c_n[k];
     uint32_t carry = 0;
     for(int k=7; k>=0; k--) { uint32_t nc = (n_half[k] & 1) << 31; n_half[k] = (n_half[k] >> 1) | carry; carry = nc; }
     for(int k=7; k>=0; k--) { if (s_val[k] > n_half[k]) return false; if (s_val[k] < n_half[k]) break; }
+    
     Point Q;
     if (!parsePubKey(t->pubKey, t->pubKeyLen, &Q)) return false;
+    
     uint32_t s_mont[8], w_mont[8];
     montMul(s_mont, s_val, c_n_r2, c_n, c_n_inv);
     montExp(w_mont, s_mont, (const uint32_t[]){0xD036413F, 0xBFD25E8C, 0xAF48A03B, 0xBAAEDCE6, 0xFFFFFFFE, 0xFFFFFFFF, 0xFFFFFFFF, 0xFFFFFFFF}, c_n, c_n_inv, c_n_r2);
+    
     parseRaw256(h_val, t->hash, 32);
     uint32_t h_mont[8], r_mont[8], u1[8], u2[8];
     montMul(h_mont, h_val, c_n_r2, c_n, c_n_inv);
     montMul(r_mont, r_val, c_n_r2, c_n, c_n_inv);
     montMul(u1, h_mont, w_mont, c_n, c_n_inv);
     montMul(u2, r_mont, w_mont, c_n, c_n_inv);
+    
     uint32_t u1_raw[8], u2_raw[8], one[8] = {1,0,0,0,0,0,0,0};
     montMul(u1_raw, u1, one, c_n, c_n_inv);
     montMul(u2_raw, u2, one, c_n, c_n_inv);
+
     Point G = {{c_gx[0],c_gx[1],c_gx[2],c_gx[3],c_gx[4],c_gx[5],c_gx[6],c_gx[7]},
                {c_gy[0],c_gy[1],c_gy[2],c_gy[3],c_gy[4],c_gy[5],c_gy[6],c_gy[7]},
                {1,0,0,0,0,0,0,0}};
     montMul(G.x, G.x, c_p_r2, c_p, c_p_inv); montMul(G.y, G.y, c_p_r2, c_p, c_p_inv); montMul(G.z, G.z, c_p_r2, c_p, c_p_inv);
+    
     Point GPQ, Res; for(int k=0; k<8; k++) Res.z[k]=0;
     pointAdd(&GPQ, &G, &Q);
+    
     for (int i = 255; i >= 0; i--) {
         pointDouble(&Res, &Res);
         int b1 = (u1_raw[i/32] >> (i%32)) & 1;
@@ -267,12 +292,19 @@ __device__ bool verify_internal(const SigTask* t) {
         else if (b1) pointAdd(&Res, &Res, &G);
         else if (b2) pointAdd(&Res, &Res, &Q);
     }
+    
     if (isZero256(Res.z)) return false;
+    
     uint32_t z_inv[8], z_inv2[8], x_affine[8];
     montExp(z_inv, Res.z, (const uint32_t[]){0xFFFFFC2D, 0xFFFFFFFE, 0xFFFFFFFF, 0xFFFFFFFF, 0xFFFFFFFF, 0xFFFFFFFF, 0xFFFFFFFF, 0xFFFFFFFF}, c_p, c_p_inv, c_p_r2);
     montMul(z_inv2, z_inv, z_inv, c_p, c_p_inv);
     montMul(x_affine, Res.x, z_inv2, c_p, c_p_inv);
     montMul(x_affine, x_affine, one, c_p, c_p_inv);
+
+    if (idx == 0) {
+        print256("Affine X", x_affine);
+    }
+
     for(int k=0; k<8; k++) if (x_affine[k] != r_val[k]) return false;
     return true;
 }
@@ -280,15 +312,16 @@ __device__ bool verify_internal(const SigTask* t) {
 __global__ void verifyBatchKernel(const SigTask* tasks, uint8_t* results, int numTasks) {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (idx >= numTasks) return;
-    results[idx] = verify_internal(&tasks[idx]) ? 1 : 0;
+    results[idx] = verify_internal(&tasks[idx], idx) ? 1 : 0;
 }
 
 extern "C" int cudaVerifyBatch(const SigTask* h_tasks, int numTasks, uint8_t* h_results) {
     SigTask *d_tasks; uint8_t *d_results;
-    if (cudaMalloc(&d_tasks, numTasks * sizeof(SigTask)) != cudaSuccess) return -1;
-    if (cudaMalloc(&d_results, numTasks) != cudaSuccess) { cudaFree(d_tasks); return -1; }
+    cudaMalloc(&d_tasks, numTasks * sizeof(SigTask));
+    cudaMalloc(&d_results, numTasks);
     cudaMemcpy(d_tasks, h_tasks, numTasks * sizeof(SigTask), cudaMemcpyHostToDevice);
     verifyBatchKernel<<<(numTasks+255)/256, 256>>>(d_tasks, d_results, numTasks);
+    cudaDeviceSynchronize();
     cudaMemcpy(h_results, d_results, numTasks, cudaMemcpyDeviceToHost);
     cudaFree(d_tasks); cudaFree(d_results);
     return 0;
