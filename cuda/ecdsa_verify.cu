@@ -2,7 +2,7 @@
 #include <cstdint>
 #include <stdio.h>
 
-// Set to 1 to see intermediate math in docker logs (first task only)
+// Set to 1 to see intermediate math in docker logs
 #define DEBUG_VERIFY 1
 
 // ============================================================================
@@ -21,15 +21,11 @@ typedef struct {
 } SigTask;
 #pragma pack(pop)
 
-// Field Prime P
 __constant__ uint32_t c_p[8] = {0xFFFFFC2F, 0xFFFFFFFE, 0xFFFFFFFF, 0xFFFFFFFF, 0xFFFFFFFF, 0xFFFFFFFF, 0xFFFFFFFF, 0xFFFFFFFF};
-// Curve Order N
 __constant__ uint32_t c_n[8] = {0xD0364141, 0xBFD25E8C, 0xAF48A03B, 0xBAAEDCE6, 0xFFFFFFFE, 0xFFFFFFFF, 0xFFFFFFFF, 0xFFFFFFFF};
-// Generator G
 __constant__ uint32_t c_gx[8] = {0x16F81798, 0x59F2815B, 0x2DCE28D9, 0x029BFCDB, 0xCE870B07, 0x55A06295, 0xF9DCBBAC, 0x79BE667E};
 __constant__ uint32_t c_gy[8] = {0xFB10D4B8, 0x9C47D08F, 0xA6855419, 0xFD17B448, 0x0E1108A8, 0x5DA4FBFC, 0x26A3C465, 0x483ADA77};
 
-// Montgomery Constants (inv = -m^-1 mod 2^32)
 __constant__ uint32_t c_p_inv = 0xD2253531;
 __constant__ uint32_t c_p_r2[8] = {0x000E90A1, 0x000007A2, 0x00000001, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000};
 __constant__ uint32_t c_n_inv = 0x5588B13F;
@@ -209,8 +205,6 @@ __device__ void parseRaw256(uint32_t* r, const uint8_t* data, int len) {
 
 __device__ bool parseDER(const uint8_t* sig, int len, uint32_t* r, uint32_t* s) {
     if (len < 8 || sig[0] != 0x30) return false;
-    int total_len = sig[1];
-    if (total_len + 2 > len) return false;
     int rlen = sig[3];
     if (rlen > 33 || 5 + rlen >= len) return false;
     int slen = sig[5 + rlen];
