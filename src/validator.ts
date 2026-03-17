@@ -16,8 +16,11 @@ const authMiddleware = (req: express.Request, res: express.Response, next: expre
     const token = process.env.GPU_TOKEN || 'default_token_change_me';
     const authHeader = req.headers.authorization;
     
-    if (!authHeader || !authHeader.includes(token)) {
-        console.log('Auth failed:', authHeader);
+    // Extract token from "Bearer <token>"
+    const providedToken = authHeader?.startsWith('Bearer ') ? authHeader.substring(7) : authHeader;
+    
+    if (!providedToken || providedToken !== token) {
+        console.log(`Auth failed. Expected: ...${token.slice(-4)}, Received: ${providedToken ? providedToken.slice(-4) : 'none'}`);
         return res.status(401).json({ error: 'Unauthorized' });
     }
     next();
@@ -60,15 +63,20 @@ app.get('/health', (req, res) => {
 });
 
 app.post('/verify/signatures', authMiddleware, async (req, res) => {
-    console.log('Verify signatures:', req.body);
-    
+    // 1. Log the raw length to verify the JSON arrived
+    const tasks = req.body?.tasks || [];
+    console.log(`Received batch size: ${tasks.length}`);
+
+    if (tasks.length === 0) {
+        return res.status(400).json({ 
+            error: "No tasks provided in the 'tasks' array",
+            received: req.body 
+        });
+    }
+
     try {
-        const tasks = req.body?.tasks || [];
-        if (!Array.isArray(tasks)) {
-            return res.status(400).json({ error: 'tasks must be an array' });
-        }
-        
         const start = Date.now();
+        // 2. Wrap the native call to ensure it doesn't hang the event loop
         const results = await verifySignaturesAsync(tasks);
         
         res.json({
@@ -78,12 +86,8 @@ app.post('/verify/signatures', authMiddleware, async (req, res) => {
             mode: usingGPU ? 'gpu' : 'cpu'
         });
     } catch (e) {
-        console.error('Error in verifySignatures:', e);
-        // Ensure we always return a valid JSON response
-        res.status(500).json({ 
-            error: (e as Error).message,
-            mode: usingGPU ? 'gpu' : 'cpu'
-        });
+        console.error('GPU Execution Error:', e);
+        res.status(500).json({ error: (e as Error).message });
     }
 });
 

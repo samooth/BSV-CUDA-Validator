@@ -6,11 +6,13 @@ services:
     
     runtime: nvidia
     
-    # No env vars needed - loaded from .env file
+    # Load token from the .env file synced by rsync
+    env_file:
+      - .env
+    
     volumes:
       - ./data:/data
       - ./logs:/app/logs
-      - ./.env:/app/.env:ro  # Mount .env if exists, or container creates it
     
     ports:
       - "${RPC_PORT:-8080}:8080"

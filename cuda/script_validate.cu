@@ -2,49 +2,39 @@
 #include <cstdint>
 
 typedef struct {
-    uint8_t* scriptPubKey;
-    uint16_t pubKeyLen;
-    uint8_t* scriptSig;
+    uint32_t sigOffset;
+    uint32_t pubKeyOffset;
+    uint32_t hashOffset;
     uint16_t sigLen;
-    uint8_t txHash[32];
-} ScriptTask;
+    uint16_t pubKeyLen;
+} ValidationTask;
 
-__device__ bool executeScript(const ScriptTask* task) {
-    // Placeholder: P2PKH validation
-    // 1. scriptSig: <sig> <pubkey>
-    // 2. scriptPubKey: OP_DUP OP_HASH160 <pubkeyhash> OP_EQUALVERIFY OP_CHECKSIG
-    
-    // Real implementation needs full script engine
-    // For now, assume valid if lengths look reasonable
-    return task->sigLen > 10 && task->pubKeyLen > 20;
-}
-
-__global__ void validateScriptsBatch(
-    const ScriptTask* tasks,
-    uint8_t* results,
-    int numTasks
-) {
+__global__ void validateScriptKernel(const ValidationTask* tasks, const uint8_t* dataPool, uint8_t* results, int numTasks) {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (idx >= numTasks) return;
     
-    results[idx] = executeScript(&tasks[idx]) ? 1 : 0;
+    // In a real implementation, this would call the ecdsa verify logic
+    // for each script task. For now, it's a structural placeholder.
+    results[idx] = 1; 
 }
 
-extern "C" int cudaValidateScripts(const void* tasks, int numTasks, uint8_t* results) {
-    uint8_t *d_results;
-    ScriptTask *d_tasks;
+extern "C" int cudaValidateScripts(const ValidationTask* h_tasks, const uint8_t* h_pool, int poolSize, int numTasks, uint8_t* h_results) {
+    ValidationTask *d_tasks;
+    uint8_t *d_pool, *d_results;
     
+    cudaMalloc(&d_tasks, numTasks * sizeof(ValidationTask));
+    cudaMalloc(&d_pool, poolSize);
     cudaMalloc(&d_results, numTasks);
-    cudaMalloc(&d_tasks, numTasks * sizeof(ScriptTask));
-    cudaMemcpy(d_tasks, tasks, numTasks * sizeof(ScriptTask), cudaMemcpyHostToDevice);
     
-    int threads = 256;
-    int blocks = (numTasks + threads - 1) / threads;
-    validateScriptsBatch<<<blocks, threads>>>(d_tasks, d_results, numTasks);
+    cudaMemcpy(d_tasks, h_tasks, numTasks * sizeof(ValidationTask), cudaMemcpyHostToDevice);
+    cudaMemcpy(d_pool, h_pool, poolSize, cudaMemcpyHostToDevice);
     
-    cudaMemcpy(results, d_results, numTasks, cudaMemcpyDeviceToHost);
+    validateScriptKernel<<<(numTasks+255)/256, 256>>>(d_tasks, d_pool, d_results, numTasks);
     
-    cudaFree(d_results);
+    cudaMemcpy(h_results, d_results, numTasks, cudaMemcpyDeviceToHost);
+    
     cudaFree(d_tasks);
+    cudaFree(d_pool);
+    cudaFree(d_results);
     return 0;
 }

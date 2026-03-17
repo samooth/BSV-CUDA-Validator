@@ -67,6 +67,7 @@ RUN apt-get update && apt-get install -y \
 WORKDIR /app
 
 # Copy built artifacts
+COPY --from=node-builder /app/package*.json ./
 COPY --from=node-builder /app/dist ./dist
 COPY --from=node-builder /app/node_modules ./node_modules
 COPY --from=node-builder /app/cuda ./cuda
@@ -83,7 +84,3 @@ COPY start.sh ./
 RUN chmod +x start.sh
 
 CMD ["./start.sh"]
-
-EXPOSE 8080
-
-CMD ["node", "dist/validator.js"]

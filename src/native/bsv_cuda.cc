@@ -1,20 +1,51 @@
 #include <nan.h>
 #include <cstdint>
 #include <cstring>
+#include <vector>
+#include <string>
 
-// CUDA function declarations (from .cu files)
-extern "C" int cudaVerifyBatch(const void* tasks, int numTasks, uint8_t** results);
-extern "C" int cudaMerkleRoot(const uint8_t* txHashes, int numTx, uint8_t* root);
-
-// C++ struct matching CUDA struct exactly
+// C++ struct matching CUDA struct exactly (with padding/alignment)
+#pragma pack(push, 1)
 typedef struct {
     uint8_t hash[32];
     uint8_t sig[72];
     uint8_t pubKey[65];
     uint16_t sigLen;
+    uint16_t pubKeyLen;
 } SignatureTask;
+#pragma pack(pop)
+
+// CUDA function declarations
+extern "C" int cudaVerifyBatch(const SignatureTask* tasks, int numTasks, uint8_t* results);
+extern "C" int cudaMerkleRoot(const uint8_t* txHashes, int numTx, uint8_t* root);
 
 using namespace v8;
+
+// Helper to decode hex string to buffer
+bool hexToBuf(Local<Value> val, uint8_t* dst, size_t maxLen, uint16_t* outLen = nullptr) {
+    if (val.IsEmpty() || val->IsNull() || val->IsUndefined()) return false;
+    
+    if (val->IsObject() && node::Buffer::HasInstance(val)) {
+        size_t len = node::Buffer::Length(val);
+        size_t copyLen = len < maxLen ? len : maxLen;
+        memcpy(dst, node::Buffer::Data(val), copyLen);
+        if (outLen) *outLen = (uint16_t)copyLen;
+        return true;
+    } else if (val->IsString()) {
+        Nan::Utf8String hexStr(val);
+        std::string s(*hexStr);
+        if (s.length() % 2 != 0) return false;
+        size_t len = s.length() / 2;
+        size_t copyLen = len < maxLen ? len : maxLen;
+        for (size_t i = 0; i < copyLen; i++) {
+            std::string byteString = s.substr(i * 2, 2);
+            dst[i] = (uint8_t)strtol(byteString.c_str(), NULL, 16);
+        }
+        if (outLen) *outLen = (uint16_t)copyLen;
+        return true;
+    }
+    return false;
+}
 
 // ============================================================================
 // Async Worker for Signature Verification
@@ -23,77 +54,57 @@ using namespace v8;
 class VerifyWorker : public Nan::AsyncWorker {
 public:
     VerifyWorker(Nan::Callback *callback, Local<Array> tasks)
-        : AsyncWorker(callback), h_tasks(nullptr), h_results(nullptr), numTasks(0) {
+        : AsyncWorker(callback), numTasks(0) {
         
         numTasks = tasks->Length();
-        h_tasks = new SignatureTask[numTasks];
-        
-        for (int i = 0; i < numTasks; i++) {
-            Nan::MaybeLocal<Value> maybeTask = Nan::Get(tasks, i);
-            if (maybeTask.IsEmpty()) continue;
+        if (numTasks > 0) {
+            h_tasks.resize(numTasks);
+            memset(h_tasks.data(), 0, numTasks * sizeof(SignatureTask));
             
-            Local<Object> task = maybeTask.ToLocalChecked()->ToObject(Nan::GetCurrentContext()).ToLocalChecked();
-            
-            // Extract hash (Buffer)
-            Local<Value> hashVal = Nan::Get(task, Nan::New("hash").ToLocalChecked()).ToLocalChecked();
-            if (hashVal->IsObject() && node::Buffer::HasInstance(hashVal)) {
-                char* data = node::Buffer::Data(hashVal);
-                size_t len = node::Buffer::Length(hashVal);
-                memcpy(h_tasks[i].hash, data, len < 32 ? len : 32);
-            }
-            
-            // Extract sig (Buffer)
-            Local<Value> sigVal = Nan::Get(task, Nan::New("sig").ToLocalChecked()).ToLocalChecked();
-            if (sigVal->IsObject() && node::Buffer::HasInstance(sigVal)) {
-                char* data = node::Buffer::Data(sigVal);
-                size_t len = node::Buffer::Length(sigVal);
-                h_tasks[i].sigLen = len < 72 ? len : 72;
-                memcpy(h_tasks[i].sig, data, h_tasks[i].sigLen);
-            }
-            
-            // Extract pubKey (Buffer)
-            Local<Value> pubVal = Nan::Get(task, Nan::New("pubKey").ToLocalChecked()).ToLocalChecked();
-            if (pubVal->IsObject() && node::Buffer::HasInstance(pubVal)) {
-                char* data = node::Buffer::Data(pubVal);
-                size_t len = node::Buffer::Length(pubVal);
-                memcpy(h_tasks[i].pubKey, data, len < 65 ? len : 65);
+            for (int i = 0; i < numTasks; i++) {
+                Nan::MaybeLocal<Value> maybeTask = Nan::Get(tasks, i);
+                if (maybeTask.IsEmpty()) continue;
+                
+                Local<Value> taskVal = maybeTask.ToLocalChecked();
+                if (!taskVal->IsObject()) continue;
+                Local<Object> task = taskVal->ToObject(Nan::GetCurrentContext()).ToLocalChecked();
+                
+                Local<Value> hashVal = Nan::Get(task, Nan::New("hash").ToLocalChecked()).FromMaybe(Local<Value>());
+                hexToBuf(hashVal, h_tasks[i].hash, 32);
+                
+                Local<Value> sigVal = Nan::Get(task, Nan::New("sig").ToLocalChecked()).FromMaybe(Local<Value>());
+                hexToBuf(sigVal, h_tasks[i].sig, 72, &h_tasks[i].sigLen);
+                
+                Local<Value> pubVal = Nan::Get(task, Nan::New("pubKey").ToLocalChecked()).FromMaybe(Local<Value>());
+                hexToBuf(pubVal, h_tasks[i].pubKey, 65, &h_tasks[i].pubKeyLen);
             }
         }
     }
     
-    ~VerifyWorker() {
-        if (h_tasks) delete[] h_tasks;
-        if (h_results) free(h_results);
-    }
-    
     void Execute() {
-        int ret = cudaVerifyBatch(h_tasks, numTasks, &h_results);
-        if (ret != 0) {
-            SetErrorMessage("CUDA verification failed");
+        if (numTasks > 0) {
+            h_results.resize(numTasks);
+            int ret = cudaVerifyBatch(h_tasks.data(), numTasks, h_results.data());
+            if (ret != 0) {
+                SetErrorMessage("CUDA verification failed");
+            }
         }
     }
     
     void HandleOKCallback() {
         Nan::HandleScope scope;
-        
         Local<Array> results = Nan::New<Array>(numTasks);
         for (int i = 0; i < numTasks; i++) {
-            Nan::Set(results, i, Nan::New<Boolean>(h_results[i] == 1));
+            bool success = (i < (int)h_results.size()) ? (h_results[i] == 1) : false;
+            Nan::Set(results, i, Nan::New<Boolean>(success));
         }
-        
         Local<Value> argv[] = { Nan::Null(), results };
         callback->Call(2, argv, async_resource);
     }
     
-    void HandleErrorCallback() {
-        Nan::HandleScope scope;
-        Local<Value> argv[] = { Nan::New(ErrorMessage()).ToLocalChecked(), Nan::Null() };
-        callback->Call(2, argv, async_resource);
-    }
-    
 private:
-    SignatureTask* h_tasks;
-    uint8_t* h_results;
+    std::vector<SignatureTask> h_tasks;
+    std::vector<uint8_t> h_results;
     int numTasks;
 };
 
@@ -104,51 +115,38 @@ private:
 class MerkleWorker : public Nan::AsyncWorker {
 public:
     MerkleWorker(Nan::Callback *callback, Local<Array> txHashes)
-        : AsyncWorker(callback) {
+        : AsyncWorker(callback), numTx(0) {
         
         numTx = txHashes->Length();
-        h_hashes = new uint8_t[numTx * 32];
-        
-        for (int i = 0; i < numTx; i++) {
-            Nan::MaybeLocal<Value> maybeHash = Nan::Get(txHashes, i);
-            if (maybeHash.IsEmpty()) continue;
-            
-            Local<Value> hashVal = maybeHash.ToLocalChecked();
-            if (hashVal->IsObject() && node::Buffer::HasInstance(hashVal)) {
-                char* data = node::Buffer::Data(hashVal);
-                size_t len = node::Buffer::Length(hashVal);
-                memcpy(h_hashes + i * 32, data, len < 32 ? len : 32);
+        if (numTx > 0) {
+            h_hashes.resize(numTx * 32, 0);
+            for (int i = 0; i < numTx; i++) {
+                Nan::MaybeLocal<Value> maybeHash = Nan::Get(txHashes, i);
+                if (maybeHash.IsEmpty()) continue;
+                hexToBuf(maybeHash.ToLocalChecked(), h_hashes.data() + i * 32, 32);
             }
         }
-    }
-    
-    ~MerkleWorker() {
-        if (h_hashes) delete[] h_hashes;
+        memset(h_root, 0, 32);
     }
     
     void Execute() {
-        int ret = cudaMerkleRoot(h_hashes, numTx, h_root);
-        if (ret != 0) {
-            SetErrorMessage("CUDA Merkle computation failed");
+        if (numTx > 0) {
+            int ret = cudaMerkleRoot(h_hashes.data(), numTx, h_root);
+            if (ret != 0) {
+                SetErrorMessage("CUDA Merkle computation failed");
+            }
         }
     }
     
     void HandleOKCallback() {
         Nan::HandleScope scope;
-        
-        Local<Object> rootBuffer = Nan::NewBuffer((char*)h_root, 32).ToLocalChecked();
+        Local<Object> rootBuffer = Nan::CopyBuffer((char*)h_root, 32).ToLocalChecked();
         Local<Value> argv[] = { Nan::Null(), rootBuffer };
         callback->Call(2, argv, async_resource);
     }
     
-    void HandleErrorCallback() {
-        Nan::HandleScope scope;
-        Local<Value> argv[] = { Nan::New(ErrorMessage()).ToLocalChecked(), Nan::Null() };
-        callback->Call(2, argv, async_resource);
-    }
-    
 private:
-    uint8_t* h_hashes;
+    std::vector<uint8_t> h_hashes;
     uint8_t h_root[32];
     int numTx;
 };
@@ -159,84 +157,66 @@ private:
 
 NAN_METHOD(VerifySignatures) {
     if (info.Length() < 2 || !info[0]->IsArray() || !info[1]->IsFunction()) {
-        Nan::ThrowTypeError("Expected (tasks: Buffer[], callback: Function)");
+        Nan::ThrowTypeError("Expected (tasks: Object[], callback: Function)");
         return;
     }
-    
     Local<Array> tasks = info[0].As<Array>();
     Local<Function> cb = info[1].As<Function>();
-    
     Nan::Callback *callback = new Nan::Callback(cb);
     Nan::AsyncQueueWorker(new VerifyWorker(callback, tasks));
 }
 
 NAN_METHOD(ComputeMerkleRoot) {
     if (info.Length() < 2 || !info[0]->IsArray() || !info[1]->IsFunction()) {
-        Nan::ThrowTypeError("Expected (txHashes: Buffer[], callback: Function)");
+        Nan::ThrowTypeError("Expected (txHashes: (Buffer|String)[], callback: Function)");
         return;
     }
-    
     Local<Array> hashes = info[0].As<Array>();
     Local<Function> cb = info[1].As<Function>();
-    
     Nan::Callback *callback = new Nan::Callback(cb);
     Nan::AsyncQueueWorker(new MerkleWorker(callback, hashes));
 }
 
-// Synchronous versions for simple use cases
 NAN_METHOD(VerifySignaturesSync) {
     if (info.Length() < 1 || !info[0]->IsArray()) {
-        Nan::ThrowTypeError("Expected (tasks: Buffer[])");
+        Nan::ThrowTypeError("Expected (tasks: Object[])");
         return;
     }
     
     Local<Array> tasks = info[0].As<Array>();
     int numTasks = tasks->Length();
-    
-    SignatureTask* h_tasks = new SignatureTask[numTasks];
+    if (numTasks <= 0) {
+        info.GetReturnValue().Set(Nan::New<Array>(0));
+        return;
+    }
+
+    std::vector<SignatureTask> h_tasks(numTasks);
+    memset(h_tasks.data(), 0, numTasks * sizeof(SignatureTask));
     
     for (int i = 0; i < numTasks; i++) {
         Nan::MaybeLocal<Value> maybeTask = Nan::Get(tasks, i);
         if (maybeTask.IsEmpty()) continue;
+        Local<Value> taskVal = maybeTask.ToLocalChecked();
+        if (!taskVal->IsObject()) continue;
+        Local<Object> task = taskVal->ToObject(Nan::GetCurrentContext()).ToLocalChecked();
         
-        Local<Object> task = maybeTask.ToLocalChecked()->ToObject(Nan::GetCurrentContext()).ToLocalChecked();
-        
-        Local<Value> hashVal = Nan::Get(task, Nan::New("hash").ToLocalChecked()).ToLocalChecked();
-        if (hashVal->IsObject() && node::Buffer::HasInstance(hashVal)) {
-            memcpy(h_tasks[i].hash, node::Buffer::Data(hashVal), 32);
-        }
-        
-        Local<Value> sigVal = Nan::Get(task, Nan::New("sig").ToLocalChecked()).ToLocalChecked();
-        if (sigVal->IsObject() && node::Buffer::HasInstance(sigVal)) {
-            size_t len = node::Buffer::Length(sigVal);
-            h_tasks[i].sigLen = len < 72 ? len : 72;
-            memcpy(h_tasks[i].sig, node::Buffer::Data(sigVal), h_tasks[i].sigLen);
-        }
-        
-        Local<Value> pubVal = Nan::Get(task, Nan::New("pubKey").ToLocalChecked()).ToLocalChecked();
-        if (pubVal->IsObject() && node::Buffer::HasInstance(pubVal)) {
-            memcpy(h_tasks[i].pubKey, node::Buffer::Data(pubVal), 65);
-        }
+        hexToBuf(Nan::Get(task, Nan::New("hash").ToLocalChecked()).FromMaybe(Local<Value>()), h_tasks[i].hash, 32);
+        hexToBuf(Nan::Get(task, Nan::New("sig").ToLocalChecked()).FromMaybe(Local<Value>()), h_tasks[i].sig, 72, &h_tasks[i].sigLen);
+        hexToBuf(Nan::Get(task, Nan::New("pubKey").ToLocalChecked()).FromMaybe(Local<Value>()), h_tasks[i].pubKey, 65, &h_tasks[i].pubKeyLen);
     }
     
-    uint8_t* h_results = nullptr;
-    int ret = cudaVerifyBatch(h_tasks, numTasks, &h_results);
+    std::vector<uint8_t> h_results(numTasks, 0);
+    int ret = cudaVerifyBatch(h_tasks.data(), numTasks, h_results.data());
     
     Local<Array> results = Nan::New<Array>(numTasks);
-    if (ret == 0 && h_results) {
+    if (ret == 0) {
         for (int i = 0; i < numTasks; i++) {
             Nan::Set(results, i, Nan::New<Boolean>(h_results[i] == 1));
         }
-        free(h_results);
     }
     
-    delete[] h_tasks;
     info.GetReturnValue().Set(results);
 }
-
-// ============================================================================
-// Module Init
-// ============================================================================
 
 NAN_MODULE_INIT(Init) {
     Nan::Set(target, Nan::New("verifySignatures").ToLocalChecked(),

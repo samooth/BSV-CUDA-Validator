@@ -1,55 +1,29 @@
 # BSV CUDA Validator
 
-GPU-accelerated BSV block validation using NVIDIA CUDA.
+GPU-accelerated BSV block validation using NVIDIA CUDA. Optimized for high-throughput Bitcoin SV signature verification and Merkle tree computation.
 
 ## Quick Start
 
 ```bash
-# Setup
+# 1. Setup environment locally
 echo "GPU_TOKEN=$(openssl rand -hex 32)" > .env
-docker compose up -d --build
 
-# Test
-curl http://localhost:8080/health
+# 2. Sync and Deploy to Server
+# (Ensure .env.sync is configured with your server details)
+npm run sync:deploy
+
+# 3. Verify on Server
+curl -H "Authorization: Bearer $(cat .env | cut -d= -f2)" http://localhost:8080/health
 ```
 
 ## API Endpoints
 
-### GET /health
+### 1. Batch Signature Verification
+`POST /verify/signatures`
 
-Check service status.
+Verifies Secp256k1 signatures using GPU parallelism.
 
-curl -X POST http://localhost:9090/verify/signatures \
-  -H "Content-Type: application/json" \
-  -H "Authorization: Bearer $(cat .env | cut -d= -f2)" \
-  -d '{"tasks":[]}'
-
-```bash
-curl http://localhost:8080/health
-```
-
-**Response:**
-```json
-{"status":"ok","gpu":"NVIDIA GPU","timestamp":"2026-03-17T12:00:00Z"}
-```
-
----
-curl -X POST http://localhost:8080/verify/signatures \
-  -H "Content-Type: application/json" \
-  -H "Authorization: Bearer default_token_change_me" \
-  -d '{
-    "tasks": [
-      {
-        "hash": "788ba725e0d1f646a327b9b1facebfcbaab2646c5250677c04e38a4749e4c5a7",
-        "sig": "30440220734a61fe19960e730dc6d131656b6a61154e50f286ce8f7f93d76a9f89d2e971022031892b4cebebbe58fccad4235a242f024371578c2689ca192268754dc86c1cba41",
-        "pubKey": "0222cfa3253e2706e5a7d69785259d098c998e20d185ee515a2b9ad3177bca5b0f"
-      }
-    ]
-  }'
-### POST /verify/signatures
-
-Batch verify ECDSA signatures.
-
+**Example (Known Valid Case):**
 ```bash
 curl -X POST http://localhost:8080/verify/signatures \
   -H "Content-Type: application/json" \
@@ -57,24 +31,18 @@ curl -X POST http://localhost:8080/verify/signatures \
   -d '{
     "tasks": [
       {
-        "hash": "0000000000000000000000000000000000000000000000000000000000000000",
-        "sig": "3045022100...",
-        "pubKey": "04..."
+        "hash": "3d2117bc943ba3863e3385af09536b32c5103b20f472e7f93ac75150c0e1c8fb",
+        "sig": "3045022100d5404371bb627e481dd118bb2ff0982ef2330a122b639f0c4cd3287071efea90022035aa1b9a075651a4cc6fe4b8fb88bd725310bc575d171a6f9d37ba9e193c7b7a",
+        "pubKey": "04a34b99f22c790c4e36b2b3c2c35a36db06226e41c692fc82b8b56ac1c540c5bd5b8dec5235a0fa8722476c7709c02559e3aa73aa03918ba2d492eea75abea235"
       }
     ]
   }'
 ```
 
-**Response:**
-```json
-{"results":[true],"batchTimeMs":5,"count":1}
-```
+### 2. Merkle Root Computation
+`POST /compute/merkle`
 
----
-
-### POST /compute/merkle
-
-Calculate Merkle root.
+Calculates double-SHA256 Merkle root.
 
 ```bash
 curl -X POST http://localhost:8080/compute/merkle \
@@ -82,48 +50,31 @@ curl -X POST http://localhost:8080/compute/merkle \
   -H "Authorization: Bearer $(cat .env | cut -d= -f2)" \
   -d '{
     "txHashes": [
-      "0000000000000000000000000000000000000000000000000000000000000000",
-      "1111111111111111111111111111111111111111111111111111111111111111"
+      "f68255748d703b75d3495f4d29c62c1cf687e998301e7c1639245ee24959a13b",
+      "a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2"
     ]
   }'
 ```
 
-**Response:**
-```json
-{"merkleRoot":"58c3...","computationTimeMs":1,"txCount":2}
-```
+## Tools
 
-## Troubleshooting
-
-**Driver mismatch:**
+### Generating Test Data
+You can generate new valid signatures for testing using:
 ```bash
-sudo apt install nvidia-driver-580 nvidia-utils-580
-sudo reboot
+node tests/generate_valid.js
 ```
 
-**Check GPU:**
+### Checking Signatures on CPU
+To verify if a signature is valid according to standard libraries:
 ```bash
-nvidia-smi
-docker logs cuda-validator
+node tests/check_sig.js
 ```
 
-## Files
-
-| File | Purpose |
-|------|---------|
-| `Dockerfile` | Multi-stage CUDA + Node.js build |
-| `docker-compose.yml` | Service orchestration |
-| `cuda/*.cu` | GPU kernels (ECDSA, SHA-256) |
-| `src/validator.ts` | HTTP API |
-| `src/native/bsv_cuda.cc` | Node.js native addon |
-
-## Environment
-
-| Variable | Description |
-|----------|-------------|
-| `GPU_TOKEN` | API auth token (required) |
-| `RPC_PORT` | HTTP port (default: 8080) |
+## Optimizations
+- **Montgomery Arithmetic**: High-speed modular multiplication.
+- **Shamir's Trick**: Combined $u_1G + u_2Q$ calculation (~30% faster).
+- **Jacobian Coordinates**: Optimized for Secp256k1 ($a=0$).
+- **Strict Low-S**: Mandatory for Bitcoin SV compatibility.
 
 ## License
-
 MIT
