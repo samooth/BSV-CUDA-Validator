@@ -1,0 +1,29 @@
+services:
+  cuda-validator:
+    build: .
+    image: cuda_validator-cuda-validator
+    container_name: cuda-validator
+    
+    runtime: nvidia
+    
+    # No env vars needed - loaded from .env file
+    volumes:
+      - ./data:/data
+      - ./logs:/app/logs
+      - ./.env:/app/.env:ro  # Mount .env if exists, or container creates it
+    
+    ports:
+      - "${RPC_PORT:-8080}:8080"
+    
+    restart: unless-stopped
+    
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f -H \"Authorization: Bearer $$(cat /app/.env 2>/dev/null | cut -d= -f2 || echo 'default')\" http://localhost:8080/health || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+
+networks:
+  default:
+    name: cuda_validator_default

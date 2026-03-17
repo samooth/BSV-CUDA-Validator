@@ -1,0 +1,30 @@
+FROM nvidia/cuda:12.0-devel-ubuntu22.04
+
+# Install Node.js
+RUN curl -fsSL https://deb.nodesource.com/setup_20.x | bash - && \
+    apt-get install -y nodejs python3 make g++
+
+WORKDIR /app
+
+# Copy CUDA source
+COPY cuda/ ./cuda/
+COPY src/ ./src/
+COPY package*.json ./
+
+# Build CUDA kernels
+RUN cd cuda && \
+    nvcc -arch=sm_86 -O3 -shared -o libbsv_cuda.so \
+         ecdsa_verify.cu sha256_merkle.cu script_validate.cu \
+         -Xcompiler -fPIC
+
+# Build Node.js native addon
+RUN npm install && npm run build:native
+
+# Runtime environment
+ENV LD_LIBRARY_PATH=/app/cuda:$LD_LIBRARY_PATH
+ENV CUDA_VISIBLE_DEVICES=0
+ENV NODE_ENV=production
+
+EXPOSE 8080
+
+CMD ["node", "dist/validator.js"]
