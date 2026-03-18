@@ -106,33 +106,59 @@ __device__ void montMul(uint32_t* r, const uint32_t* a, const uint32_t* b, const
 }
 
 __device__ void modAdd(uint32_t* r, const uint32_t* a, const uint32_t* b, const uint32_t* m) {
-    uint32_t t[8], c;
-    asm volatile (
-        "add.cc.u32 %0, %9, %17;  addc.cc.u32 %1, %10, %18; addc.cc.u32 %2, %11, %19; addc.cc.u32 %3, %12, %20; "
-        "addc.cc.u32 %4, %13, %21; addc.cc.u32 %5, %14, %22; addc.cc.u32 %6, %15, %23; addc.cc.u32 %7, %16, %24; "
-        "addc.u32 %8, 0, 0;"
-        : "=r"(t[0]), "=r"(t[1]), "=r"(t[2]), "=r"(t[3]), "=r"(t[4]), "=r"(t[5]), "=r"(t[6]), "=r"(t[7]), "=r"(c)
+    uint32_t t[8], carry = 0;
+    asm volatile(
+        "add.cc.u32 %0, %8, %16;\n\t"  "addc.cc.u32 %1, %9, %17;\n\t"
+        "addc.cc.u32 %2, %10, %18;\n\t" "addc.cc.u32 %3, %11, %19;\n\t"
+        "addc.cc.u32 %4, %12, %20;\n\t" "addc.cc.u32 %5, %13, %21;\n\t"
+        "addc.cc.u32 %6, %14, %22;\n\t" "addc.cc.u32 %7, %15, %23;\n\t"
+        "addc.u32 %24, 0, 0;\n\t"
+        : "=r"(t[0]), "=r"(t[1]), "=r"(t[2]), "=r"(t[3]), "=r"(t[4]), "=r"(t[5]), "=r"(t[6]), "=r"(t[7]), "=r"(carry)
         : "r"(a[0]), "r"(a[1]), "r"(a[2]), "r"(a[3]), "r"(a[4]), "r"(a[5]), "r"(a[6]), "r"(a[7]),
           "r"(b[0]), "r"(b[1]), "r"(b[2]), "r"(b[3]), "r"(b[4]), "r"(b[5]), "r"(b[6]), "r"(b[7])
     );
-    uint32_t res[8];
-    uint32_t borrow = sub256(res, t, m);
-    
-    if (c || !borrow) {
-        for(int k=0; k<8; k++) r[k] = res[k];
+    uint32_t res[8], borrow = 0;
+    asm volatile(
+        "sub.cc.u32 %0, %8, %16;\n\t"  "subc.cc.u32 %1, %9, %17;\n\t"
+        "subc.cc.u32 %2, %10, %18;\n\t" "subc.cc.u32 %3, %11, %19;\n\t"
+        "subc.cc.u32 %4, %12, %20;\n\t" "subc.cc.u32 %5, %13, %21;\n\t"
+        "subc.cc.u32 %6, %14, %22;\n\t" "subc.cc.u32 %7, %15, %23;\n\t"
+        "subc.u32 %24, 0, 0;\n\t"
+        : "=r"(res[0]), "=r"(res[1]), "=r"(res[2]), "=r"(res[3]), "=r"(res[4]), "=r"(res[5]), "=r"(res[6]), "=r"(res[7]), "=r"(borrow)
+        : "r"(t[0]), "r"(t[1]), "r"(t[2]), "r"(t[3]), "r"(t[4]), "r"(t[5]), "r"(t[6]), "r"(t[7]),
+          "r"(m[0]), "r"(m[1]), "r"(m[2]), "r"(m[3]), "r"(m[4]), "r"(m[5]), "r"(m[6]), "r"(m[7])
+    );
+    if (carry || borrow == 0) { // Si hubo acarreo de suma, o NO hubo acarreo negativo en la resta (t >= m)
+        for(int i=0; i<8; i++) r[i] = res[i];
     } else {
-        for(int k=0; k<8; k++) r[k] = t[k];
+        for(int i=0; i<8; i++) r[i] = t[i];
     }
 }
 
 __device__ void modSub(uint32_t* r, const uint32_t* a, const uint32_t* b, const uint32_t* m) {
-    uint32_t res[8];
-    uint32_t borrow = sub256(res, a, b);
-    
-    if (!borrow) {
-        for(int k=0; k<8; k++) r[k] = res[k];
+    uint32_t res[8], borrow = 0;
+    asm volatile(
+        "sub.cc.u32 %0, %8, %16;\n\t"  "subc.cc.u32 %1, %9, %17;\n\t"
+        "subc.cc.u32 %2, %10, %18;\n\t" "subc.cc.u32 %3, %11, %19;\n\t"
+        "subc.cc.u32 %4, %12, %20;\n\t" "subc.cc.u32 %5, %13, %21;\n\t"
+        "subc.cc.u32 %6, %14, %22;\n\t" "subc.cc.u32 %7, %15, %23;\n\t"
+        "subc.u32 %24, 0, 0;\n\t"
+        : "=r"(res[0]), "=r"(res[1]), "=r"(res[2]), "=r"(res[3]), "=r"(res[4]), "=r"(res[5]), "=r"(res[6]), "=r"(res[7]), "=r"(borrow)
+        : "r"(a[0]), "r"(a[1]), "r"(a[2]), "r"(a[3]), "r"(a[4]), "r"(a[5]), "r"(a[6]), "r"(a[7]),
+          "r"(b[0]), "r"(b[1]), "r"(b[2]), "r"(b[3]), "r"(b[4]), "r"(b[5]), "r"(b[6]), "r"(b[7])
+    );
+    if (borrow) {
+        asm volatile(
+            "add.cc.u32 %0, %8, %16;\n\t"  "addc.cc.u32 %1, %9, %17;\n\t"
+            "addc.cc.u32 %2, %10, %18;\n\t" "addc.cc.u32 %3, %11, %19;\n\t"
+            "addc.cc.u32 %4, %12, %20;\n\t" "addc.cc.u32 %5, %13, %21;\n\t"
+            "addc.cc.u32 %6, %14, %22;\n\t" "addc.u32 %7, %15, %23;\n\t"
+            : "=r"(r[0]), "=r"(r[1]), "=r"(r[2]), "=r"(r[3]), "=r"(r[4]), "=r"(r[5]), "=r"(r[6]), "=r"(r[7])
+            : "r"(res[0]), "r"(res[1]), "r"(res[2]), "r"(res[3]), "r"(res[4]), "r"(res[5]), "r"(res[6]), "r"(res[7]),
+              "r"(m[0]), "r"(m[1]), "r"(m[2]), "r"(m[3]), "r"(m[4]), "r"(m[5]), "r"(m[6]), "r"(m[7])
+        );
     } else {
-        add256(r, res, m);
+        for(int i=0; i<8; i++) r[i] = res[i];
     }
 }
 
